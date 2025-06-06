@@ -203,9 +203,9 @@ def train_lgbm(X_train, y_train):
         model = lgb.train(params, 
                          train_data, 
                          valid_sets=[val_data],
-                         num_boost_round=500,
-                         early_stopping_rounds=30,
-                         verbose_eval=False)
+                         num_boost_round=500)
+                        #  early_stopping_rounds=30,
+                        #  verbose_eval=False)
         models.append(model)
     
     return models
@@ -286,7 +286,11 @@ def main():
         agearch_path = './data/年龄结构.xlsx',
         living_path = './data/生活水平.xlsx'
     )
-    
+    # 检查数据
+    print(df)
+    # 这里输出的df似乎有些问题，尤其是年份,可能需要进一步处理
+
+    # TODO: 更改目标城市和目标变量
     target_city = 'city1'  # 可更改为其他城市
     target_var = 'employees_number'  # 可更改为其他目标变量
     
