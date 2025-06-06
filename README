@@ -1,3 +1,4 @@
 首次运行前需要创建conda环境:conda env create -f environment.yml
 创建过程可能较慢，需要一定时间等待
 每次运行前需要激活conda环境:conda activate population_analysis
+运行完后需要退出conda环境:conda deactivate
