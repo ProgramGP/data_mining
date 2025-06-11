@@ -4,8 +4,9 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error
 import lightgbm as lgb
-from run_prophet import Prophet
+from prophet import Prophet
 import tensorflow as tf
+import xgboost as xgb
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Attention
 import matplotlib.pyplot as plt
@@ -198,9 +199,9 @@ from sklearn.model_selection import TimeSeriesSplit
 import numpy as np
 import pandas as pd
 
-def train_lgbm(X_train, y_train, X_val=None, y_val=None, use_tscv=True):
+def train_xgboost(X_train, y_train, X_val=None, y_val=None, use_tscv=True):
     """
-    优化后的LightGBM模型训练函数
+    使用XGBoost训练模型
     
     参数:
     X_train -- 训练集特征
@@ -212,90 +213,79 @@ def train_lgbm(X_train, y_train, X_val=None, y_val=None, use_tscv=True):
     返回:
     单个模型或多个模型的列表
     """
-    # 优化后的参数设置
+    # XGBoost参数设置
     params = {
-        'objective': 'regression',
-        'metric': 'mae',
-        'boosting_type': 'gbdt',
-        'num_leaves': 63,  # 增加叶子数量以捕捉更复杂模式
-        'max_depth': 8,     # 增加深度
-        'learning_rate': 0.03,  # 降低学习率
-        'feature_fraction': 0.8,
-        'bagging_fraction': 0.8,
-        'bagging_freq': 5,
-        'lambda_l1': 0.1,   # L1正则化
-        'lambda_l2': 0.1,   # L2正则化
-        'min_child_samples': 20,
-        'verbose': -1
+        'objective': 'reg:squarederror',
+        'eval_metric': 'mae',
+        'learning_rate': 0.03,
+        'max_depth': 8,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'alpha': 0.1,  # L1正则化
+        'lambda': 0.1,  # L2正则化
+        'min_child_weight': 20,
+        # 'n_estimators': 1500,
+        'random_state': 42
     }
     
     # 如果有显式提供的验证集
     if X_val is not None and y_val is not None:
-        train_data = lgb.Dataset(X_train, label=y_train)
-        val_data = lgb.Dataset(X_val, label=y_val)
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dval = xgb.DMatrix(X_val, label=y_val)
         
-        model = lgb.train(
+        model = xgb.train(
             params,
-            train_data,
-            num_boost_round=1500,  # 增加迭代次数
-            valid_sets=[val_data],
-            early_stopping_rounds=100,  # 启用早停
+            dtrain,
+            num_boost_round=1500,
+            evals=[(dval, 'validation')],
+            early_stopping_rounds=100,
             verbose_eval=50
         )
         return model
     
     # 使用时序交叉验证
     if use_tscv:
-        tscv = TimeSeriesSplit(n_splits=5)  # 增加交叉验证折数
+        tscv = TimeSeriesSplit(n_splits=5)
         models = []
         
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
             print(f"\n训练折叠 {fold+1}/{tscv.n_splits}")
             
             # 创建数据集
-            train_data = lgb.Dataset(
-                X_train[train_idx], 
-                label=y_train.iloc[train_idx]
-            )
-            val_data = lgb.Dataset(
-                X_train[val_idx], 
-                label=y_train.iloc[val_idx]
-            )
+            dtrain = xgb.DMatrix(X_train[train_idx], label=y_train.iloc[train_idx])
+            dval = xgb.DMatrix(X_train[val_idx], label=y_train.iloc[val_idx])
             
             # 训练模型
-            model = lgb.train(
+            model = xgb.train(
                 params,
-                train_data,
+                dtrain,
                 num_boost_round=1500,
-                valid_sets=[val_data],
-                callbacks=[
-                    lgb.early_stopping(stopping_rounds=100, verbose=True),
-                    lgb.log_evaluation(period=50)
-                ]
+                evals=[(dval, 'validation')],
+                early_stopping_rounds=100,
+                verbose_eval=50
             )
             models.append(model)
             
             # 打印当前折叠的验证MAE
-            val_pred = model.predict(X_train[val_idx])
+            val_pred = model.predict(dval)
             val_mae = mean_absolute_error(y_train.iloc[val_idx], val_pred)
             print(f"折叠 {fold+1} 验证MAE: {val_mae:.4f}")
         
         return models
     
     # 如果没有验证集且不使用交叉验证
-    train_data = lgb.Dataset(X_train, label=y_train)
-    model = lgb.train(
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    model = xgb.train(
         params,
-        train_data,
+        dtrain,
         num_boost_round=1500,
         verbose_eval=50
     )
     return model
 
-
 # 4. Prophet模型
 from sklearn.preprocessing import StandardScaler
-from run_prophet import Prophet
+# from prophet import Prophet
 import pandas as pd
 import numpy as np
 import logging
@@ -428,12 +418,13 @@ def evaluate_models(models, X_test, y_test, features, scaler=None):
     predictions = []
     
     for model in models:
-        if isinstance(model, lgb.Booster):  # LightGBM
+        if isinstance(model, xgb.Booster):  # XGBoost
             if scaler:
                 X_scaled = scaler.transform(X_test[features])
             else:
                 X_scaled = X_test
-            pred = model.predict(X_scaled)
+            dtest = xgb.DMatrix(X_scaled)
+            pred = model.predict(dtest)
         elif hasattr(model, 'predict'):  # Prophet
             future = model.make_future_dataframe(periods=len(X_test), include_history=False)
             for feature in ['urbanization_rate', 'unemployment_rate', 'average_wage']:
@@ -530,10 +521,12 @@ def predict_2023_population(model, X_2023):
     if isinstance(model, list):  # 如果是多个模型的列表（交叉验证结果）
         predictions = np.zeros(len(X_2023))
         for m in model:
-            predictions += m.predict(X_2023)
+            dtest = xgb.DMatrix(X_2023)
+            predictions += m.predict(dtest)
         predictions /= len(model)
     else:  # 单个模型
-        predictions = model.predict(X_2023)
+        dtest = xgb.DMatrix(X_2023)
+        predictions = model.predict(dtest)
     
     return predictions[0]
 
@@ -572,58 +565,7 @@ def main():
     )
     # 检查数据
     print(df)
-    #保存
-    # df.to_csv('data.csv')
-    # 这里输出的df似乎有些问题，尤其是年份,可能需要进一步处理
-    # target_city = 'city1'  # 可更改为其他目标城市
-    # target_var = 'employees_number'  # 可更改为其他目标变量
-    
-    
-    # 准备数据集
-    # X_train, y_train, X_test, y_test, scaler, features = prepare_datasets(
-    #     df, target_city, test_year=2023, target_var=target_var
-    # )
-    
-    # # 训练LightGBM
-    # lgb_models = train_lgbm(X_train, y_train)
-    
-    # 训练Prophet
-    # prophet_model = train_prophet(df, target_city, target_var)
-    
-    # # 准备LSTM数据
-    # X_train_lstm = X_train.reshape(X_train.shape[0], 1, X_train.shape[1])
-    # X_test_lstm = X_test.reshape(X_test.shape[0], 1, X_test.shape[1])
-    
-    # # 训练LSTM
-    # lstm_model = build_lstm_model((X_train_lstm.shape[1], X_train_lstm.shape[2]))
-    # lstm_model.fit(X_train_lstm, y_train, epochs=50, batch_size=8, verbose=0)
-    
-    # 评估模型
-    # test_df = df[(df['city'] == target_city) & (df.index.year >= 2018)].copy()
-    # ensemble_pred, mae = evaluate_models(
-    #     lgb_models,
-    #     test_df,
-    #     y_test,
-    #     features,
-    #     scaler
-    # )
-    
-    # print(f"MAE for {target_city}: {mae:.2f}")
-    
-    # # 可视化结果
-    # results = pd.DataFrame({
-    #     'year': test_df.index.year,
-    #     'actual': y_test,
-    #     'predicted': ensemble_pred
-    # })
-    # print(results)
-    
-    # plot_results(
-    #     y_test, 
-    #     ensemble_pred, 
-    #     test_df.index.year, 
-    #     target_city
-    # )
+
     # 创建空DataFrame收集所有结果
     all_results = pd.DataFrame()
     target_cities = ['city1', 'city2', 'city3', 'city4', 'city5','city6','city7','city8','city9','city10',
@@ -631,7 +573,6 @@ def main():
                      ,'city21','city22','city23','city24','city25','city26','city27','city28','city29','city30'
                      ,'city31','city32','city33','city34','city35','city36','city37','city38','city39','city40']
     for target_city in target_cities:
-    # TODO: 更改目标城市和目标变量
         target_var = 'longterm_population'  # 可更改为其他目标变量
         
         # 准备数据集
@@ -640,15 +581,19 @@ def main():
         )
         
         # 训练LightGBM模型
+        # print(f"训练模型预测{target_city}的常住人口...")
+        # lgb_models = train_lgbm(X_train, y_train)
+
+        # 训练XGBoost模型
         print(f"训练模型预测{target_city}的常住人口...")
-        lgb_models = train_lgbm(X_train, y_train)
+        xgb_models = train_xgboost(X_train, y_train)
         
         # prophet_model = train_prophet(df, target_city, target_var)
         # 准备2023年的数据
         X_2023, future_df = prepare_2023_data(df, target_city, scaler, features)
         
         # 预测2023年人口
-        prediction_2023 = predict_2023_population(lgb_models, X_2023)
+        prediction_2023 = predict_2023_population(xgb_models, X_2023)
         print(f"\n{target_city} 2023年常住人口预测值: {prediction_2023:.2f} 万人")
         
         # 可视化结果

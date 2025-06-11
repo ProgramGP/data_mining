@@ -12,6 +12,7 @@ dependencies:
   - tensorflow
   - matplotlib
   - openpyxl  # 用于处理Excel文件
+  - xgboost
   - pip
   - pip:
       - keras-tuner  # 可选，用于超参数调优
