@@ -4,8 +4,9 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error
 import lightgbm as lgb
-# from run_prophet import Prophet
+from prophet import Prophet
 import tensorflow as tf
+import xgboost as xgb
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Attention
 
@@ -141,8 +142,8 @@ def load_and_preprocess(population_density_path,population_size_path,urbanizatio
     df['productivity'] = df['average_wage'] * df['employees_number'] / 1e6  # 百万为单位
     
     # 滞后特征
-    for lag in [1,2,3]:
-        for col in ['urbanization_rate', 'average_wage', 'unemployment_rate','household_population']:
+    for lag in [1, 2, 3]:
+        for col in ['urbanization_rate', 'employees_number', 'average_wage', 'unemployment_rate','longterm_population']:
             df[f'{col}_lag_{lag}'] = df.groupby('city')[col].shift(lag)
     
     # 时间特征
@@ -152,21 +153,21 @@ def load_and_preprocess(population_density_path,population_size_path,urbanizatio
     return df
 
 # 2. 特征选择与数据集划分
-def prepare_datasets(df, target_city, test_year=2018, target_var='household_population'):
+def prepare_datasets(df, target_city, test_year=2018, target_var='employees_number'):
     city_df = df[df['city'] == target_city].copy()
     
     # TODO: 增加特征
     # 特征选择 
     base_features = [
-        'urbanization_rate', 'unemployment_rate', 'employees_number','longterm_population','household_population',
+        'urbanization_rate', 'unemployment_rate', 'employees_number','longterm_population',
         'primary_industry', 'secondary_industry', 'tertiary_industry',
         'average_wage', 'non_agricultural_ratio', 'industry_balance',
         'wage_per_employee', 'productivity'
     ]
     
     lag_features = [f'{col}_lag_{lag}' 
-                   for col in ['urbanization_rate', 'average_wage', 'unemployment_rate','household_population']
-                   for lag in [1,2,3]]
+                   for col in ['urbanization_rate', 'employees_number', 'average_wage', 'unemployment_rate','longterm_population']
+                   for lag in [1, 2, 3]]
     
     features = base_features + lag_features
     target = target_var
@@ -327,9 +328,9 @@ from sklearn.model_selection import TimeSeriesSplit
 import numpy as np
 import pandas as pd
 
-def train_lgbm(X_train, y_train, X_val=None, y_val=None, use_tscv=False):
+def train_xgboost(X_train, y_train, X_val=None, y_val=None, use_tscv=True):
     """
-    优化后的LightGBM模型训练函数
+    使用XGBoost训练模型
     
     参数:
     X_train -- 训练集特征
@@ -341,86 +342,242 @@ def train_lgbm(X_train, y_train, X_val=None, y_val=None, use_tscv=False):
     返回:
     单个模型或多个模型的列表
     """
-    # 优化后的参数设置
+    # XGBoost参数设置
     params = {
-        'objective': 'regression',
-        'metric': 'mae',
-        'boosting_type': 'gbdt',
-        'num_leaves': 50,  # 增加叶子数以适应聚类数据
-        'max_depth': 8,    # 适度深度
-        'learning_rate': 0.02,
-        'num_boost_round': 1000,
-        'feature_fraction': 0.8,
-        'bagging_fraction': 0.8,
-        'bagging_freq': 5,
-        'lambda_l1': 0.1,
-        'lambda_l2': 0.1,
-        'min_child_samples': 20,
-        'verbose': -1
+        'objective': 'reg:squarederror',
+        'eval_metric': 'mae',
+        'learning_rate': 0.03,
+        'max_depth': 8,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'alpha': 0.1,  # L1正则化
+        'lambda': 0.1,  # L2正则化
+        'min_child_weight': 20,
+        # 'n_estimators': 1500,
+        'random_state': 42
     }
     
     
     # 如果有显式提供的验证集
     if X_val is not None and y_val is not None:
-        train_data = lgb.Dataset(X_train, label=y_train)
-        val_data = lgb.Dataset(X_val, label=y_val)
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dval = xgb.DMatrix(X_val, label=y_val)
         
-        model = lgb.train(
+        model = xgb.train(
             params,
-            train_data,
-            num_boost_round=1500,  # 增加迭代次数
-            valid_sets=[val_data],
-            early_stopping_rounds=100,  # 启用早停
+            dtrain,
+            num_boost_round=1500,
+            evals=[(dval, 'validation')],
+            early_stopping_rounds=100,
             verbose_eval=50
         )
         return model
     
     # 使用时序交叉验证
     if use_tscv:
-        tscv = TimeSeriesSplit(n_splits=5)  # 增加交叉验证折数
+        tscv = TimeSeriesSplit(n_splits=5)
         models = []
         
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
             print(f"\n训练折叠 {fold+1}/{tscv.n_splits}")
             
             # 创建数据集
-            train_data = lgb.Dataset(
-                X_train[train_idx], 
-                label=y_train.iloc[train_idx]
-            )
-            val_data = lgb.Dataset(
-                X_train[val_idx], 
-                label=y_train.iloc[val_idx]
-            )
+            dtrain = xgb.DMatrix(X_train[train_idx], label=y_train.iloc[train_idx])
+            dval = xgb.DMatrix(X_train[val_idx], label=y_train.iloc[val_idx])
             
             # 训练模型
-            model = lgb.train(
+            model = xgb.train(
                 params,
-                train_data,
+                dtrain,
                 num_boost_round=1500,
-                valid_sets=[val_data],
-                callbacks=[
-                    lgb.early_stopping(stopping_rounds=100, verbose=True),
-                    lgb.log_evaluation(period=50)
-                ]
+                evals=[(dval, 'validation')],
+                early_stopping_rounds=100,
+                verbose_eval=50
             )
             models.append(model)
             
             # 打印当前折叠的验证MAE
-            val_pred = model.predict(X_train[val_idx])
+            val_pred = model.predict(dval)
             val_mae = mean_absolute_error(y_train.iloc[val_idx], val_pred)
             print(f"折叠 {fold+1} 验证MAE: {val_mae:.4f}")
         
         return models
     
     # 如果没有验证集且不使用交叉验证
-    train_data = lgb.Dataset(X_train, label=y_train)
-    model = lgb.train(
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    model = xgb.train(
         params,
-        train_data,
-        num_boost_round=1500
+        dtrain,
+        num_boost_round=1500,
+        verbose_eval=50
     )
     return model
+
+# 4. Prophet模型
+from sklearn.preprocessing import StandardScaler
+# from prophet import Prophet
+import pandas as pd
+import numpy as np
+import logging
+
+# 配置Prophet日志
+logging.getLogger('prophet').setLevel(logging.WARNING)
+logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+
+def train_prophet(df, target_city, target_var='employees_number'):
+    # 选择目标城市数据
+    city_df = df[df['city'] == target_city].copy()
+    
+    if city_df.empty:
+        raise ValueError(f"找不到城市 '{target_city}' 的数据")
+    
+    # 1. 时间索引处理
+    if not isinstance(city_df.index, pd.DatetimeIndex):
+        try:
+            city_df.index = pd.to_datetime(city_df.index)
+            city_df['ds'] = city_df.index
+        except:
+            if 'year' in city_df.columns:
+                city_df['ds'] = pd.to_datetime(city_df['year'].astype(str) + '-01-01')
+            else:
+                raise ValueError("数据集缺少有效的时间信息")
+    else:
+        city_df['ds'] = city_df.index
+    
+    # 确保ds列存在并排序
+    city_df = city_df.sort_values('ds')
+    
+    # 2. 创建Prophet专用DataFrame
+    prophet_df = pd.DataFrame({
+        'ds': city_df['ds'],
+        'y': city_df[target_var]
+    }).reset_index(drop=True)
+    
+    # 3. 添加外生变量 - 简化处理
+    features = ['urbanization_rate', 'unemployment_rate', 'average_wage']
+    available_features = [f for f in features if f in city_df.columns]
+    
+    if available_features:
+        # 使用MinMaxScaler代替StandardScaler
+        from sklearn.preprocessing import MinMaxScaler
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        
+        # 提取特征数据并填充缺失值
+        feature_data = city_df[available_features].fillna(city_df[available_features].mean())
+        
+        # 缩放特征
+        scaled_features = scaler.fit_transform(feature_data)
+        
+        # 添加到Prophet DataFrame
+        for i, feature in enumerate(available_features):
+            prophet_df[feature] = scaled_features[:, i]
+    else:
+        scaler = None
+        print(f"警告: {target_city} 没有可用的外生变量")
+    
+    # 4. 删除包含NaN的行
+    prophet_df = prophet_df.dropna()
+    
+    # 检查数据量
+    if len(prophet_df) < 3:
+        raise ValueError(f"数据不足 ({len(prophet_df)} 条)，无法训练模型")
+    
+    # 5. 创建更简单的模型
+    model = Prophet(
+        yearly_seasonality=True,
+        daily_seasonality=False,
+        weekly_seasonality=False,
+        changepoint_prior_scale=0.01,  # 更保守的设置
+        seasonality_mode='additive',
+        changepoint_range=0.8,
+        n_changepoints=min(5, len(prophet_df) // 2)  # 更少的变化点
+    )
+    
+    # 6. 添加外生变量
+    for feature in available_features:
+        model.add_regressor(feature)
+    
+    # 7. 训练模型 - 简化优化过程
+    try:
+        # 尝试使用默认优化设置
+        model.fit(prophet_df)
+    except Exception as e:
+        print(f"Prophet训练错误: {e}")
+        print("尝试简化模型...")
+        
+        # 创建更简单的模型（无外生变量）
+        simple_model = Prophet(
+            yearly_seasonality=True,
+            daily_seasonality=False,
+            weekly_seasonality=False,
+            changepoint_prior_scale=0.001,
+            seasonality_mode='additive'
+        )
+        
+        try:
+            simple_model.fit(prophet_df[['ds', 'y']])
+            print("使用简化模型成功")
+            model = simple_model
+        except Exception as e2:
+            print(f"简化模型训练失败: {e2}")
+            raise RuntimeError(f"所有训练尝试均失败: {e2}")
+    
+    # 将scaler附加到模型对象
+    model.scaler = scaler
+    model.features = available_features
+    
+    return model
+
+
+
+# 5. LSTM模型
+def build_lstm_model(input_shape):
+    model = Sequential([
+        LSTM(32, return_sequences=True, input_shape=input_shape),
+        Attention(),
+        LSTM(16),
+        Dense(16, activation='relu'),
+        Dense(1)
+    ])
+    
+    model.compile(optimizer='adam', loss='mae')
+    return model
+
+# 6. 模型集成与评估
+def evaluate_models(models, X_test, y_test, features, scaler=None):
+    predictions = []
+    
+    for model in models:
+        if isinstance(model, xgb.Booster):  # XGBoost
+            if scaler:
+                X_scaled = scaler.transform(X_test[features])
+            else:
+                X_scaled = X_test
+            dtest = xgb.DMatrix(X_scaled)
+            pred = model.predict(dtest)
+        elif hasattr(model, 'predict'):  # Prophet
+            future = model.make_future_dataframe(periods=len(X_test), include_history=False)
+            for feature in ['urbanization_rate', 'unemployment_rate', 'average_wage']:
+                future[feature] = X_test[feature].values
+            pred = model.predict(future)['yhat'].values
+        predictions.append(pred)
+    
+    ensemble_pred = np.mean(predictions, axis=0)
+    mae = mean_absolute_error(y_test, ensemble_pred)
+    
+    return ensemble_pred, mae
+
+# 7. 可视化结果
+def plot_results(y_true, y_pred, years, city_name):
+    plt.figure(figsize=(12, 6))
+    plt.plot(years, y_true, 'b-', label='Actual')
+    plt.plot(years, y_pred, 'r--', label='Predicted')
+    plt.title(f'Population Prediction for {city_name}')
+    plt.xlabel('Year')
+    plt.ylabel('Population')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
 # 在原有代码基础上添加以下函数
 
@@ -449,8 +606,11 @@ def prepare_2023_data(df, target_city, scaler, features):
     new_row.name = pd.to_datetime('2023-01-01')  # 设置2023年的时间索引
     new_row['year'] = 2023  # 更新年份为2023
     
-    # 更新滞后特征
-    lag_features = ['urbanization_rate', 'average_wage', 'unemployment_rate','household_population']
+    # 更新年份为2023
+    new_row['year'] = 2023
+    
+    # 更新滞后特征 - 使用2022年的值作为2023年的滞后特征
+    lag_features = ['urbanization_rate', 'employees_number', 'average_wage', 'unemployment_rate']
     
     for col in lag_features:
         # 滞后1特征 = 最新年份的实际值
@@ -491,14 +651,35 @@ def predict_2023_population(model, X_2023):
     if isinstance(model, list):  # 如果是多个模型的列表（交叉验证结果）
         predictions = np.zeros(len(X_2023))
         for m in model:
-            predictions += m.predict(X_2023)
+            dtest = xgb.DMatrix(X_2023)
+            predictions += m.predict(dtest)
         predictions /= len(model)
-    elif hasattr(model, 'predict'):  # 单个模型（包括scikit-learn接口）
-        predictions = model.predict(X_2023)
-    else:  # LightGBM原生模型
-        predictions = model.predict(X_2023)
+    else:  # 单个模型
+        dtest = xgb.DMatrix(X_2023)
+        predictions = model.predict(dtest)
     
     return predictions[0]
+
+def plot_prediction_history(history_df, prediction_2023, city_name):
+    """
+    可视化历史数据和2023年预测
+    """
+    plt.figure(figsize=(12, 6))
+    
+    # 绘制历史数据
+    history_df = history_df[history_df['city'] == city_name]
+    plt.plot(history_df.index.year, history_df['longterm_population'], 'o-', label='历史数据')
+    
+    # 添加2023年预测
+    plt.plot(2023, prediction_2023, 's', markersize=10, color='red', label='2023年预测')
+    
+    plt.title(f'{city_name}常住人口预测 (2023年)')
+    plt.xlabel('年份')
+    plt.ylabel('常住人口（万人）')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f'{city_name}_2023_prediction.png')
+    plt.show()
 
 # 主流程
 def main():
@@ -512,18 +693,9 @@ def main():
         agearch_path='./data/年龄结构.xlsx',
         living_path='./data/生活水平.xlsx'
     )
-    
-    # 城市聚类分析
-    print("\n" + "="*50)
-    print("开始城市聚类分析...")
-    print("="*50)
-    n_clusters = 30  # 聚类数量，可根据需要调整
-    df, city_cluster_map = cluster_cities(df, n_clusters=n_clusters)
-    
-    # 获取聚类信息
-    clusters = sorted(df['cluster'].unique())
-    print(f"\n共发现 {len(clusters)} 个聚类")
-    
+    # 检查数据
+    print(df)
+
     # 创建空DataFrame收集所有结果
     all_results = pd.DataFrame()
     target_cities = ['city1', 'city2', 'city3', 'city4', 'city5','city6','city7','city8','city9','city10',
@@ -583,50 +755,45 @@ def main():
     print("="*50)
     
     for target_city in target_cities:
-        # 获取该城市所属的聚类
-        cluster_id = city_cluster_map.get(target_city)
-        if cluster_id is None:
-            print(f"警告: 未找到城市 {target_city} 的聚类信息，使用默认聚类0")
-            cluster_id = 0
+        target_var = 'longterm_population'  # 可更改为其他目标变量
         
-        # 获取该聚类的模型、标准化器和特征
-        model = cluster_models.get(cluster_id)
-        scaler = cluster_scalers.get(cluster_id)
-        features = cluster_features.get(cluster_id)
+        # 准备数据集
+        X_train, y_train, X_test, y_test, scaler, features = prepare_datasets(
+            df, target_city, test_year=2023, target_var=target_var
+        )
         
-        if model is None or scaler is None or features is None:
-            print(f"错误: 聚类 {cluster_id} 的模型未准备好，跳过 {target_city}")
-            continue
+        # 训练LightGBM模型
+        # print(f"训练模型预测{target_city}的常住人口...")
+        # lgb_models = train_lgbm(X_train, y_train)
+
+        # 训练XGBoost模型
+        print(f"训练模型预测{target_city}的常住人口...")
+        xgb_models = train_xgboost(X_train, y_train)
         
-        try:
-            # 准备2023年的数据
-            X_2023, future_df = prepare_2023_data(df, target_city, scaler, features)
-            
-            # 预测2023年人口
-            prediction_2023 = predict_2023_population(model, X_2023)
-            print(f"{target_city} (聚类 {cluster_id}) 2023年常住人口预测值: {prediction_2023:.2f} 万人")
-            
-            # 保存预测结果
-            result_df = pd.DataFrame({
-                'city_id': [target_city],
-                'cluster': [cluster_id],
-                'year': [2023],
-                'pred': [prediction_2023]
-            })
-            all_results = pd.concat([all_results, result_df], ignore_index=True)
+        # prophet_model = train_prophet(df, target_city, target_var)
+        # 准备2023年的数据
+        X_2023, future_df = prepare_2023_data(df, target_city, scaler, features)
         
-        except Exception as e:
-            print(f"预测 {target_city} 时出错: {str(e)}")
-            # 添加空结果
-            result_df = pd.DataFrame({
-                'city_id': [target_city],
-                'cluster': [cluster_id],
-                'year': [2023],
-                'pred': [np.nan]
-            })
-            all_results = pd.concat([all_results, result_df], ignore_index=True)
-    
-    # 保存所有结果
+        # 预测2023年人口
+        prediction_2023 = predict_2023_population(xgb_models, X_2023)
+        print(f"\n{target_city} 2023年常住人口预测值: {prediction_2023:.2f} 万人")
+        
+        # 可视化结果
+        # plot_prediction_history(df, prediction_2023, target_city)
+        
+        # 保存预测结果
+        result_df = pd.DataFrame({
+            'city_id': [target_city],
+            'year': [2023],
+            'pred': [prediction_2023]
+        })
+
+        # 将当前城市的结果添加到总结果中
+        all_results = pd.concat([all_results, result_df], ignore_index=True)
+
+        # result_df.to_csv(f'2023_population_prediction.csv', index=False)
+        # print(f"预测结果已保存至 {target_city}_2023_population_prediction.csv")
+    # 循环结束后，一次性保存所有结果
     all_results.to_csv('2023_all_cities_population_prediction.csv', index=False)
     print(f"\n所有城市预测结果已保存至 2023_all_cities_population_prediction.csv")
     
