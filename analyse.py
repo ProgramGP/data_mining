@@ -144,6 +144,9 @@ def load_and_preprocess(population_density_path,population_size_path,urbanizatio
     # 时间特征
     df['year'] = pd.to_datetime(df['year'], format='%Y')
     df.set_index('year', inplace=True)
+
+    df = pd.get_dummies(df, columns=['city'], prefix='city')
+    
     
     return df
 
@@ -214,19 +217,21 @@ def train_lgbm(X_train, y_train, X_val=None, y_val=None, use_tscv=False):
     """
     # 优化后的参数设置
     params = {
-        'objective': 'regression',
-        'metric': 'mae',
-        'boosting_type': 'gbdt',
-        'num_leaves': 35,  # 增加叶子数量以捕捉更复杂模式
-        'max_depth': 20,     # 增加深度
-        'learning_rate': 0.015,  # 降低学习率
-        'feature_fraction': 0.8,
-        'bagging_fraction': 0.8,
-        'bagging_freq': 5,
-        'lambda_l1': 0.1,   # L1正则化
-        'lambda_l2': 0.1,   # L2正则化
-        'min_child_samples': 20,
-        'verbose': -1
+    'objective': 'regression',
+    'metric': 'mae',
+    'boosting_type': 'gbdt',
+    'num_leaves': 40,  # 适中的叶子数
+    'max_depth': 10,   # 适中的深度
+    'learning_rate': 0.01,  # 比原设置更高的学习率
+    'num_boost_round': 1000,  # 增加迭代次数
+    # 'early_stopping_rounds': 50,  # 早停机制
+    'feature_fraction': 0.7,  # 特征采样比例
+    'bagging_fraction': 0.7,  # 样本采样比例
+    'bagging_freq': 5,  # 采样频率
+    'lambda_l1': 0.2,  # 增强L1正则化
+    'lambda_l2': 0.2,  # 增强L2正则化
+    'min_child_samples': 30,  # 增加叶子节点样本数
+    'verbose': -1
     }
     
     # 如果有显式提供的验证集
@@ -291,28 +296,13 @@ def train_lgbm(X_train, y_train, X_val=None, y_val=None, use_tscv=False):
     )
     return model
 
-
-
-# 7. 可视化结果
-def plot_results(y_true, y_pred, years, city_name):
-    plt.figure(figsize=(12, 6))
-    plt.plot(years, y_true, 'b-', label='Actual')
-    plt.plot(years, y_pred, 'r--', label='Predicted')
-    plt.title(f'Population Prediction for {city_name}')
-    plt.xlabel('Year')
-    plt.ylabel('Population')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
 # 在原有代码基础上添加以下函数
 
 def prepare_2023_data(df, target_city, scaler, features):
     """
     准备2023年的预测数据
     """
-    # 获取目标城市的最新数据（2022年）
-    # 筛选目标城市数据
+    # 获取目标城市的最新数据（优先使用2022年）
     city_data = df[df['city'] == target_city].copy()
     
     if city_data.empty:
@@ -384,27 +374,6 @@ def predict_2023_population(model, X_2023):
     
     return predictions[0]
 
-def plot_prediction_history(history_df, prediction_2023, city_name):
-    """
-    可视化历史数据和2023年预测
-    """
-    plt.figure(figsize=(12, 6))
-    
-    # 绘制历史数据
-    history_df = history_df[history_df['city'] == city_name]
-    plt.plot(history_df.index.year, history_df['household_population'], 'o-', label='历史数据')
-    
-    # 添加2023年预测
-    plt.plot(2023, prediction_2023, 's', markersize=10, color='red', label='2023年预测')
-    
-    plt.title(f'{city_name}常住人口预测 (2023年)')
-    plt.xlabel('年份')
-    plt.ylabel('常住人口（万人）')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(f'{city_name}_2023_prediction.png')
-    plt.show()
-
 # 主流程
 def main():
     # 数据准备
@@ -417,15 +386,15 @@ def main():
         agearch_path = './data/年龄结构.xlsx',
         living_path = './data/生活水平.xlsx'
     )
-    # 检查数据
+    
+    # 创建空DataFrame收集所有结果
     all_results = pd.DataFrame()
     target_cities = ['city1', 'city2', 'city3', 'city4', 'city5','city6','city7','city8','city9','city10',
                      'city11','city12','city13','city14','city15','city16','city17','city18','city19','city20'
                      ,'city21','city22','city23','city24','city25','city26','city27','city28','city29','city30'
                      ,'city31','city32','city33','city34','city35','city36','city37','city38','city39','city40']
     for target_city in target_cities:
-    # TODO: 更改目标城市和目标变量
-        target_var = 'household_population'  # 可更改为其他目标变量
+        target_var = 'household_population'
         
         # 准备数据集
         X_train, y_train, X_test, y_test, scaler, features = prepare_datasets(
@@ -435,18 +404,13 @@ def main():
         # 训练LightGBM模型
         print(f"训练模型预测{target_city}的常住人口...")
         lgb_models = train_lgbm(X_train, y_train)
-        # print(X_train)
-        # print(y_train)
-        # prophet_model = train_prophet(df, target_city, target_var)
+        
         # 准备2023年的数据
         X_2023, future_df = prepare_2023_data(df, target_city, scaler, features)
         
         # 预测2023年人口
         prediction_2023 = predict_2023_population(lgb_models, X_2023)
-        print(f"\n{target_city} 2023年常住人口预测值: {prediction_2023:.2f} 万人")
-        
-        # 可视化结果
-        # plot_prediction_history(df, prediction_2023, target_city)
+        print(f"{target_city} 2023年常住人口预测值: {prediction_2023:.2f} 万人")
         
         # 保存预测结果
         result_df = pd.DataFrame({
@@ -454,14 +418,8 @@ def main():
             'year': [2023],
             'pred': [prediction_2023]
         })
-
-        # 将当前城市的结果添加到总结果中
         all_results = pd.concat([all_results, result_df], ignore_index=True)
-
-        # if target_city == 'city1':
-        #     break;
-        # result_df.to_csv(f'2023_population_prediction.csv', index=False)
-        # print(f"预测结果已保存至 {target_city}_2023_population_prediction.csv")
+    
     # 循环结束后，一次性保存所有结果
     all_results.to_csv('2023_all_cities_population_prediction.csv', index=False)
     print(f"所有城市预测结果已保存至 2023_all_cities_population_prediction.csv")
